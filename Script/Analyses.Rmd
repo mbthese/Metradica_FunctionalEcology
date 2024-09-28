@@ -1,0 +1,1316 @@
+---
+title: "Paper Analyses"
+author: "Marion Boisseaux"
+date: "2023-04-11"
+output: html_document
+---
+
+# Results
+
+Shifting trait coordination along a soil-moisture-nutrient gradient in tropical forests.
+
+Authors : *Marion Boisseaux*, Daniela  Nemetschek, Christopher Baraloto, Benoit Burban, Angela Casado-Garcia, Jocelyn Cazal, Jeanne Clément, Géraldine Derroire, Claire Fortunel, Jean-Yves Goret, Jonathan Heras, Gaelle Jaouen, Isabelle Maréchaux, Christine Scoffoni, Ghislain Vieilledent, Jason Vleminckx, Sabrina Coste, Heidy Schimann, Clément Stahl.
+
+```{r}
+library(dplyr)
+library(VIM)
+library(mice)
+library(nlme) #to fit the model and do the variance partitioning with ML method
+library(lme4) #for the VarCorr function
+library(ggplot2) #to plot
+library(kableExtra) #to build nice tables
+library(devtools)
+library(ggfortify)
+```
+
+# Data 
+
+Raw and imputation
+
+```{r Data not log subset}
+Metradica <- read.csv("Dataset/raw_traits/Final_Metradica_OUT_30112022.csv") %>% 
+  dplyr::select(Code, Genus, Species, Name, Habitat, Type, Forest, Plot, Gmin, TLP, LSWC, MajVLA, Nitrogen, Carbon, Phosphorous, Potassium, SD, TWI, DBH) %>%
+  rename(K= Potassium,
+         P = Phosphorous,
+         C = Carbon, 
+         N= Nitrogen)
+
+sub_data_TF <- Metradica %>%
+  filter(Name %in% c("Dicorynia_guianensis", "Iryanthera_sagotiana", "Gustavia_hexapetala", "Licania_membranacea", "Poraqueiba_guianensis", "Virola_michelii")) %>% filter(Habitat == "TF")
+
+sub_data_SF <- Metradica %>%
+  filter(Name %in% c("Eschweilera_coriacea","Eperua_falcata", "Iryanthera_hostmannii", "Laetia_procera", "Protium_opacum subsp. rabelianum", "Pterocarpus_officinalis", "Symphonia_globulifera", "Virola_surinamensis", "Carapa_surinamensis")) %>% filter(Habitat == "BF")
+
+sub_data_G <-  Metradica %>%
+  filter(Name %in% c("Bocoa_prouacensis", "Conceveiba_guianensis", "Jacaranda_copaia subsp. copaia", "Hymenopus_heteromorphus", "Protium_stevensonii", "Tachigali_melinonii"))
+
+sub_data <- bind_rows(sub_data_TF, sub_data_SF, sub_data_G)
+
+sub_data <- sub_data %>% mutate(Type= ifelse(Name == 'Virola_michelii','TF',Type))
+
+sub_data <- sub_data %>% mutate(Type= ifelse(Name == 'Eschweilera_coriacea','BF',Type))
+
+Metradica <- sub_data
+```
+
+
+Exploring where Nas are located in the dataset and imputing traits except SD.
+
+```{r exploring NA}
+
+#check the nas
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+apply(Metradica,2,pMiss)
+
+#we see that SD is almost 30% missing values, the rest is below a threshold of 5%
+aggr_plot <- aggr(Metradica, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(Metradica), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+
+#imputing th emissing data for all traits 
+tempData <- mice(Metradica,m=5,maxit=50,meth='pmm',seed=500)
+summary(tempData)
+completedData <- complete(tempData,1)
+
+#no imputation of SD
+data <- Metradica %>% dplyr::select(-SD)
+tempData_noSD <- mice(data,m=5,maxit=50,meth='pmm',seed=500) #m=5 is 5 datasets
+summary(tempData_noSD)
+completedData <- complete(tempData_noSD,1) #1 is choosing dataset 1 out of the 5
+
+B <- Metradica %>% dplyr::select(Code, SD)
+
+A <- left_join(completedData, B,  c("Code"))
+
+#write.csv(A, "Dataset/imputed_traits/Subset_imputation_exceptSD_18042023.csv", col.names = FALSE, row.names = FALSE)
+
+#inspecting data after imputation
+densityplot(tempData_noSD)
+tempData_noSD$imp$K
+
+```
+
+
+## Figure 1 - Contribution of the environment to single-trait variation 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#library used
+library(nlme) #to fit the model and do the variance partitioning with ML method
+library(lme4) #for the VarCorr function
+library(dplyr) #to pipe
+library(ggplot2) #to plot
+library(kableExtra) #to build nice tables
+
+#data used (log on all traits)
+Data <- read.csv("Dataset/imputed_traits/Subset_imputation_exceptSD_18042023.csv") %>% 
+  rename(Carbon = C,
+         Nitrogen = N,
+         Potassium = K, 
+         Phosphorus = P) %>% 
+  relocate(SD, .after = MajVLA) %>%
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Carbon", "Nitrogen", "Phosphorus", "Potassium", "TWI"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium", "TWI"), log) %>% 
+  mutate(TLP = -TLP)
+
+Data$Forest <- as.factor(Data$Forest)
+
+#function for variance partitioning
+Var_par <- function(Trait, Mydata){
+
+  #Rename the trait column
+  colnames(Mydata)[which(colnames(Mydata) == Trait)] <- "Trait"  
+  
+  # Fit the linear mixed-effects model
+  model <- nlme::lme(Trait ~ TWI + Forest,  random=~1|Name, data = Mydata, na.action = na.omit, method = "ML")
+  
+  #Fit the associated null model with random intercept on species
+  null_model <- nlme::lme(Trait~ 1,  random=~1|Name, data = Mydata, na.action = na.omit, method = "ML")
+  
+  # Extract the variance components 
+  Var_components <-lme4::VarCorr(model)
+  var_sp <- as.numeric(Var_components[1,1]) #for the random effects - species
+  var_indv <- as.numeric(Var_components[2,1]) #model residual, also known as the intraspecific residual variance (linked to the individual but also error measures).
+  
+  # Obtain the variance of the random effect in the null model.
+  random_variance_null <- as.numeric(lme4::VarCorr(null_model)[1,1])
+  
+  # Obtain the residual variance
+  residual_variance_null <- as.numeric(lme4::VarCorr(null_model)[2,1])
+  
+  # Obtain the total variance of the null model
+  v_0 <- random_variance_null + residual_variance_null
+  
+  # Calculate the variance component linked to the env't by substracting the residual variance of the model (var_indv) and the variance explained by the random factor, the species (var_sp), from the variance of the null model
+ 
+  # Variance partitioning
+  var_sp <- round(100 * var_sp / v_0)
+  var_indv <- round(100 * var_indv / v_0)
+  var_envt <- round(100 - (var_sp + var_indv))  # or it works also , var_envt <- v_0 - var_indv - var_sp Marion calcul
+  
+  Traits <- c(Trait, Trait, Trait)
+  Levels <- c("Environment", "Species", "Individual")
+  Variances <- c(var_envt,var_sp,var_indv)
+
+  return(data.frame(Traits, Levels, Variances))
+}
+
+# Loop to calculate the variance partitioning for all traits
+vars <- c()
+#here we do for all species preferences but if interested for generalists only: Data <- Data %>% filter(Type != "Generalist")
+
+for (i in colnames(Data)[9:17]){
+  
+  vars <- bind_rows(vars, Var_par(Trait = i, Mydata = Data))
+  
+}
+#vars
+
+#plot the results
+
+vars$Levels <- as.factor(vars$Levels)
+ordered_traits <- vars %>%
+  filter(Levels == "Environment") %>%
+  arrange(Variances) %>%
+  pull(Traits)
+
+vars$Traits <- factor(vars$Traits, levels = ordered_traits)
+
+variance_plot<- vars %>%  
+  mutate(Levels = factor(Levels, levels=c("Environment", "Species", "Individual"))) %>%
+  mutate(Traits = dplyr::recode(Traits, "Gmin" = "g[min]")) %>% #recode gmin
+  ggplot(aes(fill=Levels, y=Variances, x=Traits)) + 
+  geom_bar(position="stack", stat="identity") +
+  theme_minimal(base_size = 22) +
+  ylab("") + xlab("")+
+  theme(legend.text = element_text(face = "italic"),legend.position = "bottom") +
+  scale_fill_manual("", values=c("#BBBBBB", "#CCBC44", "#029A88"),
+                    breaks=c("Individual", "Species", "Environment"),
+                    labels=c("Individual", "Species", "Environment"))  +
+  coord_flip() +
+  scale_x_discrete(labels = scales::label_parse())
+
+variance_plot
+
+#save plot
+ggsave(filename = "Figure1.png", plot = variance_plot, bg = "white", width = 10, height = 8, dpi = 600)
+
+
+##############################################
+#function for plotting residuals distribution 
+##############################################
+
+
+# res_plot <- function(Trait, Mydata){
+#   
+#   #Rename the trait column
+#   colnames(Mydata)[which(colnames(Mydata) == Trait)] <- "Trait"  
+#   
+#   
+#   # Fit the linear mixed-effects model
+#   model <- lmer(Trait ~ TWI + Forest + (1 | Name), data = Mydata)
+#   plot <- qqnorm(resid(model), main= Trait)
+#   
+#   
+#   return(plot)
+# }
+# 
+# # Loop to plot residuals of the model for all traits
+# 
+# plotlist <- list()
+# 
+# for (i in colnames(Data)[9:17]){
+#   
+#   
+#   plotlist[[i]] <- local({
+#     
+#     i <- i
+#     
+#     res_plot(i, Data)
+#   })
+#   
+#   
+# }
+
+##############################
+###Build coefficient table ###
+##############################
+
+
+#function for extracting the coefficient of the model
+model_coef_table <- function(Trait, Mydata){
+
+  #Rename the trait column
+  colnames(Mydata)[which(colnames(Mydata) == Trait)] <- "Trait"  
+  
+  # Fit the linear mixed-effects model
+  model <- nlme::lme(Trait ~ TWI + Forest,  random=~1|Name, data = Mydata, na.action = na.omit, method = "ML")
+  
+  # build coef table 
+  coef_table <- coef(summary(model))
+  coef_table <- as.data.frame(coef_table)
+  
+  return(coef_table)
+}
+
+
+# For all traits call model_coef_table function
+coef_tables <- list()
+
+for (i in colnames(Data)[9:17]){
+
+  coef_tables[[i]] <- model_coef_table(i, Data)
+}
+
+# Combine all coefficient tables into one data frame
+coef_table <- do.call(rbind, coef_tables)
+
+
+# create nice table
+coef_table %>%
+  kbl(caption = "", escape = FALSE, digits = 3) %>%
+  row_spec(0, bold = TRUE) %>% 
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  save_kable(file = "../Tables_SI/Model_summaries.png", zoom = 5)
+```
+
+
+The variance partitioning showed that single-trait values are largely determined by the species identity, i.e. interspecific variability and the individual level, i.e. intraspecific variability (Figure 1). The species explained between 35% (Potassium) and 69% (SD) of the variation. The residual variance corresponding to the intraspecific variation explained between 25% (SD) and 58% (Potassium). Intraspecific variation was higher than interspecific variation for gmin, carbon, potassium, and phosphorous leaf concentration. The environment explained very little of the variation: it was highest for gmin (11%) and potassium leaf concentration (7%) but even null for carbon leaf concentration. The model summary for each trait is shown in Table S6.
+
+
+## Figure 2 - Leaf trait syndrome variation along the TWI gradient
+
+### Generalist species
+```{r generalist, eval=FALSE, include=FALSE}
+###########################################
+# Dividing the range of TWI into classes#
+###########################################
+
+library(devtools)
+library(ggfortify)
+library(ggplot2)
+
+Metradica_log <- read.csv("Dataset/imputed_traits/Subset_imputation_exceptSD_18042023.csv") %>% 
+  rename(Potassium = K, 
+         Phosphorous = P, 
+         Nitrogen = N,
+         Carbon = C) %>% 
+  relocate(SD, .after = MajVLA) %>%
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Phosphorous","Carbon", "Nitrogen", "Potassium", "TWI"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Phosphorous","Carbon", "Nitrogen", "Potassium", "TWI"), log) %>% 
+  mutate(TLP = -TLP) 
+
+#Metradica_log <- Metradica_log %>% filter(Type != "Generalist") for specialists
+Metradica_log <- Metradica_log %>% filter(Type == "Generalist") #for generalists
+nb_class <- 8 #7 for specialists and then merge classes to get enough individuals per class
+class_size <- (max(Metradica_log$TWI)-min(Metradica_log$TWI))/nb_class #each class have the same range of TWI
+data <- as.data.frame(seq(1:nb_class))
+colnames(data)[1] <- "class"
+data$min <- c() #min TWI of the class
+data$max <- c() #max TWI of the class
+data$mean <- c() #mean TWI of the class
+Metradica_log$class_TWI <- as.numeric(NA)
+
+for (i in 1:nb_class){ #attribute the individuals of the dataset to each of the 8 classes
+  
+  data$min[i] <- min(Metradica_log$TWI) + (i-1) * class_size
+  data$max[i] <- min(Metradica_log$TWI) +i * class_size
+  data$mean[i] <- (data$max[i] + data$min[i])/2
+  
+  Metradica_log$class_TWI[which(Metradica_log$TWI <= data$max[i] & Metradica_log$TWI > data$min[i]) ] <- i
+  
+}
+
+#attribute the individuals with the lowest TWI to the first class
+Metradica_log$class_TWI[which(Metradica_log$TWI == data$min[1])]  <- 1
+
+#merge TWI classes together to have approximately the same individuals per class
+
+#Metradica_log$class_TWI[which(Metradica_log$class_TWI == 7)]  <- 6 #for specialists
+
+Metradica_log$class_TWI[which(Metradica_log$class_TWI == 7)]  <- 6 #for generalists
+Metradica_log$class_TWI[which(Metradica_log$class_TWI == 8)]  <- 6 #for generalists
+
+table(Metradica_log$class_TWI) #number of individuals per class
+table(is.na(Metradica_log$class_TWI)) #verify all individuals have a class
+
+#in the data of classes, merge categories
+#data$max[which(data$class == 6 )] <- data$max[which(data$class == 7)] #for specialists
+data$max[which(data$class == 6 )] <- data$max[which(data$class == 8)] #for generalists
+data$mean[which(data$class == 6 )] <- (data$max[6] + data$min[6])/2
+data <- slice(data, 1:(n() - 2)) 
+data
+
+###################################################################################################
+#Construction of the PCAs for each TWI class level and calculating the observed trait correlation
+###################################################################################################
+
+
+#1------------
+
+Data_1 <- Metradica_log %>% filter(class_TWI == 1) #filter the data set for the first class of TWI
+res.pca_1 <- PCA(Data_1 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_1$eig #look at the eigen values 
+range_1 <- res.pca_1$eig[1,1] - res.pca_1$eig[8,1] #observed range of the eigen values
+sd_1 <- sd(res.pca_1$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_1, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#########################################################################
+#Construction of the null associated community for each TWI class level 
+#########################################################################
+
+class_1 <- c()
+class_1_sd <- c()
+indv_rich_1 <- length(levels(as.factor(Data_1$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole individual pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_1, replace =FALSE) # sampling random individuals from the whole dataset, same number of individuals as the dataset of class TWI 1 
+  Data_1_abon <- c() 
+  for (s in 1:indv_rich_1){
+      
+      Data_1_abon <- rbind(Data_1_abon, 
+                           Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 1 and getting all the characteristics (i.e. traits) for these individuals
+    }
+
+  PCA_comm_1 <- PCA(Data_1_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_1 <- c(class_1, PCA_comm_1$eig[1,1] - PCA_comm_1$eig[8,1])
+  class_1_sd <- c(class_1_sd , sd(PCA_comm_1$eig[,1]))
+}
+
+plot_1 <- hist(class_1)
+
+#Calculating the multivariate covariation  between traits index, standardized by the effect size since the comparison between groups is likely to be biased by the number of individuals used. 
+ITI_1 <- (range_1 - mean(class_1)) / sd(class_1)
+ITI_1_sd <- (sd_1 - mean(class_1_sd))/sd(class_1_sd)
+
+#2--------------------------
+
+Data_2 <- Metradica_log %>% filter(class_TWI == 2) #filter the data set for the first class of TWI
+res.pca_2 <- PCA(Data_2 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_2$eig #look at the eigen values 
+range_2 <- res.pca_2$eig[1,1] - res.pca_2$eig[8,1] #observed range of the eigen values
+sd_2 <- sd(res.pca_2$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_2, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_2
+class_2 <- c()
+class_2_sd <- c()
+indv_rich_2 <- length(levels(as.factor(Data_2$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_2, replace =FALSE) # first null community for class TWI 2 sampled from the whole dataset
+  Data_2_abon <- c()
+  for (s in 1:indv_rich_2){
+      
+      Data_2_abon <- rbind(Data_2_abon, 
+                           Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 2 
+    }
+  
+  PCA_comm_2 <- PCA(Data_2_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_2 <- c(class_2, PCA_comm_2$eig[1,1] - PCA_comm_2$eig[8,1])
+  class_2_sd <- c(class_2_sd , sd(PCA_comm_2$eig[,1]))
+}
+
+plot_2 <- hist(class_2)
+
+#Calculating the multivariate covariation  between traits index, standardized by the effect size since the comparison between groups is likely to be biased by the number of individuals used. 
+ITI_2 <- (range_2 - mean(class_2)) / sd(class_2)
+ITI_2_sd <- (sd_2 - mean(class_2_sd))/sd(class_2_sd)
+
+#3--------------
+
+Data_3 <- Metradica_log %>% filter(class_TWI == 3) #filter the data set for the first class of TWI
+res.pca_3 <- PCA(Data_3 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_3$eig #look at the eigen values 
+range_3 <- res.pca_3$eig[1,1] - res.pca_3$eig[8,1] #observed range of the eigen values
+sd_3 <- sd(res.pca_3$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_3, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_3
+class_3 <- c()
+class_3_sd <- c()
+indv_rich_3 <- length(levels(as.factor(Data_3$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_3, replace =FALSE) # first null community for class TWI 3 sampled from the whole dataset
+  Data_3_abon <- c()
+  for (s in 1:indv_rich_3){
+    
+    Data_3_abon <- rbind(Data_3_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 3 
+  }
+  
+  PCA_comm_3 <- PCA(Data_3_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_3 <- c(class_3, PCA_comm_3$eig[1,1] - PCA_comm_3$eig[8,1])
+  class_3_sd <- c(class_3_sd , sd(PCA_comm_3$eig[,1]))
+}
+
+plot_3 <- hist(class_3)
+
+ITI_3 <- (range_3 - mean(class_3))/sd(class_3)
+ITI_3_sd <- (sd_3 - mean(class_3_sd))/sd(class_3_sd)
+
+#4------------
+Data_4 <- Metradica_log %>% filter(class_TWI == 4) #filter the data set for the first class of TWI
+res.pca_4 <- PCA(Data_4 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_4$eig #look at the eigen values 
+range_4 <- res.pca_4$eig[1,1] - res.pca_4$eig[8,1] #observed range of the eigen values
+sd_4 <- sd(res.pca_4$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_4, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_4
+class_4 <- c()
+class_4_sd <- c()
+indv_rich_4 <- length(levels(as.factor(Data_4$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_4, replace =FALSE) # first null community for class TWI 4 sampled from the whole dataset
+  Data_4_abon <- c()
+  for (s in 1:indv_rich_4){
+    
+    Data_4_abon <- rbind(Data_4_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 4 
+  }
+  
+  PCA_comm_4 <- PCA(Data_4_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_4 <- c(class_4, PCA_comm_4$eig[1,1] - PCA_comm_4$eig[8,1])
+  class_4_sd <- c(class_4_sd , sd(PCA_comm_4$eig[,1]))
+}
+
+plot_4 <- hist(class_4)
+
+ITI_4 <- (range_4 - mean(class_4))/sd(class_4)
+ITI_4_sd <- (sd_4 - mean(class_4_sd))/sd(class_4_sd)
+
+#5----------
+Data_5 <- Metradica_log %>% filter(class_TWI == 5) #filter the data set for the first class of TWI
+res.pca_5 <- PCA(Data_5 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_5$eig #look at the eigen values 
+range_5 <- res.pca_5$eig[1,1] - res.pca_5$eig[8,1] #observed range of the eigen values
+sd_5 <- sd(res.pca_5$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_5, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_5
+class_5 <- c()
+class_5_sd <- c()
+indv_rich_5 <- length(levels(as.factor(Data_5$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_5, replace =FALSE) # first null community for class TWI 5 sampled from the whole dataset
+  Data_5_abon <- c()
+  for (s in 1:indv_rich_5){
+    
+    Data_5_abon <- rbind(Data_5_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 5 
+  }
+  
+  PCA_comm_5 <- PCA(Data_5_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_5 <- c(class_5, PCA_comm_5$eig[1,1] - PCA_comm_5$eig[8,1])
+  class_5_sd <- c(class_5_sd , sd(PCA_comm_5$eig[,1]))
+}
+
+plot_5 <- hist(class_5)
+
+ITI_5 <- (range_5 - mean(class_5))/sd(class_5)
+ITI_5_sd <- (sd_5 - mean(class_5_sd))/sd(class_5_sd)
+#6----------------
+
+Data_6 <- Metradica_log %>% filter(class_TWI == 6) #filter the data set for the first class of TWI
+res.pca_6 <- PCA(Data_6 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_6$eig #look at the eigen values 
+range_6 <- res.pca_6$eig[1,1] - res.pca_6$eig[8,1] #observed range of the eigen values
+sd_6 <- sd(res.pca_6$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_6, addlabels = TRUE, ylim = c(0, 60)) #visualization of the scree plot
+
+#null community associated to the Data_6
+class_6 <- c()
+class_6_sd <- c()
+indv_rich_6 <- length(levels(as.factor(Data_6$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_6, replace =FALSE) # first null community for class TWI 6 sampled from the whole dataset
+  Data_6_abon <- c()
+  for (s in 1:indv_rich_6){
+    
+    Data_6_abon <- rbind(Data_6_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 6 
+  }
+  
+  PCA_comm_6 <- PCA(Data_6_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_6 <- c(class_6, PCA_comm_6$eig[1,1] - PCA_comm_6$eig[8,1])
+  class_6_sd <- c(class_6_sd , sd(PCA_comm_6$eig[,1]))
+}
+
+plot_6 <- hist(class_6)
+
+ITI_6 <- (range_6 - mean(class_6))/sd(class_6)
+ITI_6_sd <- (sd_6 - mean(class_6_sd))/sd(class_6_sd)
+
+#####################
+#Plots
+#####################
+ #data for generalists
+data$ranges <- c(range_1, range_2, range_3, range_4, range_5, range_6)
+data$sd <- c(sd_1, sd_2, sd_3, sd_4, sd_5, sd_6)
+data$ITI <- c(ITI_1, ITI_2, ITI_3, ITI_4, ITI_5, ITI_6)
+data$ITI_sd <- c(ITI_1_sd, ITI_2_sd, ITI_3_sd, ITI_4_sd, ITI_5_sd, ITI_6_sd)
+
+#write.csv(data, "Dataset/TI/data_generalist.csv")
+```
+
+```{r generalist plot, message=FALSE, warning=FALSE, include=FALSE}
+###########################################
+library(ggpubr)
+
+#read previously saved file for the generalist
+data <- read.csv("Dataset/TI/data_generalist.csv")
+
+#plot generalists
+
+title <- "Generalist"
+
+# Create a text grob
+tgrob <- ggpubr::text_grob(title,size = 16)
+# Draw the text
+plot_0 <- as_ggplot(tgrob) + theme(plot.margin = margin(0,3,0,0, "cm"))
+
+
+#Plot TI (ranges standardized by effect size) along TWI 
+A <- ggplot(data) +
+  aes(x = mean, y = ITI, ymax= ITI, ymin= 0) +
+  geom_pointrange(shape = "circle", size = 1, color = "#009E72") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+  ylab(expression(atop("Trait integration index", italic("range")))) + #atop creates a line break
+  xlab("Topographic wetness index") +
+  theme(axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12)) +
+  theme_minimal(base_size = 12) +
+  guides(color = "none") +#remove legend
+ylim(-4, 6)+
+  xlim(1.7, 2.6)
+A
+
+#Plot TI_sd along TWI
+B <- ggplot(data) +
+  aes(x = mean, y = ITI_sd, ymax= ITI_sd, ymin=0) +
+  geom_pointrange(shape = "circle", size = 1, color = "#009E72") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+  ylab(expression(atop("Trait integration index", italic("standard deviation")))) +
+  xlab("Topographic wetness index") +
+  theme(axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12)) +
+  theme_minimal(base_size = 12)+
+  guides(color = "none")+
+  ylim(-4, 6)+
+  xlim(1.7, 2.6)
+B
+```
+
+### Specialist species
+
+```{r specialist, eval=FALSE, include=FALSE}
+###########################################
+# Dividing the range of TWI into classes#
+###########################################
+
+
+library(devtools)
+library(ggfortify)
+library(ggplot2)
+
+Metradica_log <- read.csv("Dataset/imputed_traits/Subset_imputation_exceptSD_18042023.csv") %>% 
+  rename(Potassium = K, 
+         Phosphorous = P, 
+         Nitrogen = N,
+         Carbon = C) %>% 
+  relocate(SD, .after = MajVLA) %>%
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Phosphorous","Carbon", "Nitrogen", "Potassium", "TWI"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Phosphorous","Carbon", "Nitrogen", "Potassium", "TWI"), log) %>% 
+  mutate(TLP = -TLP) 
+
+Metradica_log <- Metradica_log %>% filter(Type != "Generalist") #for specialists
+
+nb_class <- 7 # for specialists and then merge classes to get enough individuals per class
+class_size <- (max(Metradica_log$TWI)-min(Metradica_log$TWI))/nb_class #each class have the same range of TWI
+data <- as.data.frame(seq(1:nb_class))
+colnames(data)[1] <- "class"
+data$min <- c() #min TWI of the class
+data$max <- c() #max TWI of the class
+data$mean <- c() #mean TWI of the class
+Metradica_log$class_TWI <- as.numeric(NA)
+
+for (i in 1:nb_class){ #attribute the individuals of the dataset to each of the 8 classes
+  
+  data$min[i] <- min(Metradica_log$TWI) + (i-1) * class_size
+  data$max[i] <- min(Metradica_log$TWI) +i * class_size
+  data$mean[i] <- (data$max[i] + data$min[i])/2
+  
+  Metradica_log$class_TWI[which(Metradica_log$TWI <= data$max[i] & Metradica_log$TWI > data$min[i]) ] <- i
+  
+}
+
+#attribute the individuals with the lowest TWI to the first class
+Metradica_log$class_TWI[which(Metradica_log$TWI == data$min[1])]  <- 1
+
+#merge TWI classes together to have approximately the same individuals per class
+
+Metradica_log$class_TWI[which(Metradica_log$class_TWI == 7)]  <- 6 #for specialists
+
+
+table(Metradica_log$class_TWI) #number of individuals per class
+table(is.na(Metradica_log$class_TWI)) #verify all individuals have a class
+
+#in the data of classes, merge categories
+data$max[which(data$class == 6 )] <- data$max[which(data$class == 7)] #for specialists
+data$mean[which(data$class == 6 )] <- (data$max[6] + data$min[6])/2
+data <- slice(data, 1:(n() - 1)) 
+data
+
+###################################################################################################
+#Construction of the PCAs for each TWI class level and calculating the observed trait correlation
+###################################################################################################
+
+#1------------
+
+Data_1 <- Metradica_log %>% filter(class_TWI == 1) #filter the data set for the first class of TWI
+res.pca_1 <- PCA(Data_1 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_1$eig #look at the eigen values 
+range_1 <- res.pca_1$eig[1,1] - res.pca_1$eig[8,1] #observed range of the eigen values
+sd_1 <- sd(res.pca_1$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_1, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#########################################################################
+#Construction of the null associated community for each TWI class level 
+#########################################################################
+
+class_1 <- c()
+class_1_sd <- c()
+indv_rich_1 <- length(levels(as.factor(Data_1$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole individual pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_1, replace =FALSE) # sampling random individuals from the whole dataset, same number of individuals as the dataset of class TWI 1 
+  Data_1_abon <- c() 
+  for (s in 1:indv_rich_1){
+      
+      Data_1_abon <- rbind(Data_1_abon, 
+                           Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 1 and getting all the characteristics (i.e. traits) for these individuals
+    }
+
+  PCA_comm_1 <- PCA(Data_1_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_1 <- c(class_1, PCA_comm_1$eig[1,1] - PCA_comm_1$eig[8,1])
+  class_1_sd <- c(class_1_sd , sd(PCA_comm_1$eig[,1]))
+}
+
+plot_1 <- hist(class_1)
+
+#Calculating the multivariate covariation  between traits index, standardized by the effect size since the comparison between groups is likely to be biased by the number of individuals used. 
+ITI_1 <- (range_1 - mean(class_1)) / sd(class_1)
+ITI_1_sd <- (sd_1 - mean(class_1_sd))/sd(class_1_sd)
+
+#2--------------------------
+
+Data_2 <- Metradica_log %>% filter(class_TWI == 2) #filter the data set for the first class of TWI
+res.pca_2 <- PCA(Data_2 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_2$eig #look at the eigen values 
+range_2 <- res.pca_2$eig[1,1] - res.pca_2$eig[8,1] #observed range of the eigen values
+sd_2 <- sd(res.pca_2$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_2, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_2
+class_2 <- c()
+class_2_sd <- c()
+indv_rich_2 <- length(levels(as.factor(Data_2$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_2, replace =FALSE) # first null community for class TWI 2 sampled from the whole dataset
+  Data_2_abon <- c()
+  for (s in 1:indv_rich_2){
+      
+      Data_2_abon <- rbind(Data_2_abon, 
+                           Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 2 
+    }
+  
+  PCA_comm_2 <- PCA(Data_2_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_2 <- c(class_2, PCA_comm_2$eig[1,1] - PCA_comm_2$eig[8,1])
+  class_2_sd <- c(class_2_sd , sd(PCA_comm_2$eig[,1]))
+}
+
+plot_2 <- hist(class_2)
+
+#Calculating the multivariate covariation  between traits index, standardized by the effect size since the comparison between groups is likely to be biased by the number of individuals used. 
+ITI_2 <- (range_2 - mean(class_2)) / sd(class_2)
+ITI_2_sd <- (sd_2 - mean(class_2_sd))/sd(class_2_sd)
+
+#3--------------
+
+Data_3 <- Metradica_log %>% filter(class_TWI == 3) #filter the data set for the first class of TWI
+res.pca_3 <- PCA(Data_3 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_3$eig #look at the eigen values 
+range_3 <- res.pca_3$eig[1,1] - res.pca_3$eig[8,1] #observed range of the eigen values
+sd_3 <- sd(res.pca_3$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_3, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_3
+class_3 <- c()
+class_3_sd <- c()
+indv_rich_3 <- length(levels(as.factor(Data_3$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_3, replace =FALSE) # first null community for class TWI 3 sampled from the whole dataset
+  Data_3_abon <- c()
+  for (s in 1:indv_rich_3){
+    
+    Data_3_abon <- rbind(Data_3_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 3 
+  }
+  
+  PCA_comm_3 <- PCA(Data_3_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_3 <- c(class_3, PCA_comm_3$eig[1,1] - PCA_comm_3$eig[8,1])
+  class_3_sd <- c(class_3_sd , sd(PCA_comm_3$eig[,1]))
+}
+
+plot_3 <- hist(class_3)
+
+ITI_3 <- (range_3 - mean(class_3))/sd(class_3)
+ITI_3_sd <- (sd_3 - mean(class_3_sd))/sd(class_3_sd)
+
+#4------------
+Data_4 <- Metradica_log %>% filter(class_TWI == 4) #filter the data set for the first class of TWI
+res.pca_4 <- PCA(Data_4 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_4$eig #look at the eigen values 
+range_4 <- res.pca_4$eig[1,1] - res.pca_4$eig[8,1] #observed range of the eigen values
+sd_4 <- sd(res.pca_4$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_4, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_4
+class_4 <- c()
+class_4_sd <- c()
+indv_rich_4 <- length(levels(as.factor(Data_4$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_4, replace =FALSE) # first null community for class TWI 4 sampled from the whole dataset
+  Data_4_abon <- c()
+  for (s in 1:indv_rich_4){
+    
+    Data_4_abon <- rbind(Data_4_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 4 
+  }
+  
+  PCA_comm_4 <- PCA(Data_4_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_4 <- c(class_4, PCA_comm_4$eig[1,1] - PCA_comm_4$eig[8,1])
+  class_4_sd <- c(class_4_sd , sd(PCA_comm_4$eig[,1]))
+}
+
+plot_4 <- hist(class_4)
+
+ITI_4 <- (range_4 - mean(class_4))/sd(class_4)
+ITI_4_sd <- (sd_4 - mean(class_4_sd))/sd(class_4_sd)
+
+#5----------
+Data_5 <- Metradica_log %>% filter(class_TWI == 5) #filter the data set for the first class of TWI
+res.pca_5 <- PCA(Data_5 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_5$eig #look at the eigen values 
+range_5 <- res.pca_5$eig[1,1] - res.pca_5$eig[8,1] #observed range of the eigen values
+sd_5 <- sd(res.pca_5$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_5, addlabels = TRUE, ylim = c(0, 50)) #visualization of the scree plot
+
+#null community associated to the Data_5
+class_5 <- c()
+class_5_sd <- c()
+indv_rich_5 <- length(levels(as.factor(Data_5$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_5, replace =FALSE) # first null community for class TWI 5 sampled from the whole dataset
+  Data_5_abon <- c()
+  for (s in 1:indv_rich_5){
+    
+    Data_5_abon <- rbind(Data_5_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 5 
+  }
+  
+  PCA_comm_5 <- PCA(Data_5_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_5 <- c(class_5, PCA_comm_5$eig[1,1] - PCA_comm_5$eig[8,1])
+  class_5_sd <- c(class_5_sd , sd(PCA_comm_5$eig[,1]))
+}
+
+plot_5 <- hist(class_5)
+
+ITI_5 <- (range_5 - mean(class_5))/sd(class_5)
+ITI_5_sd <- (sd_5 - mean(class_5_sd))/sd(class_5_sd)
+#6----------------
+
+Data_6 <- Metradica_log %>% filter(class_TWI == 6) #filter the data set for the first class of TWI
+res.pca_6 <- PCA(Data_6 %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE) #PCA on trait values except SD, that are scaled to unit variance
+res.pca_6$eig #look at the eigen values 
+range_6 <- res.pca_6$eig[1,1] - res.pca_6$eig[8,1] #observed range of the eigen values
+sd_6 <- sd(res.pca_6$eig[,1]) #observed standard deviation of the eigen values
+fviz_eig(res.pca_6, addlabels = TRUE, ylim = c(0, 60)) #visualization of the scree plot
+
+#null community associated to the Data_6
+class_6 <- c()
+class_6_sd <- c()
+indv_rich_6 <- length(levels(as.factor(Data_6$Code)))
+indv_rich_total <- length(levels(as.factor(Metradica_log$Code)))
+for (i in 1:1000){  #sampling 1,000 random communities from the whole indivudal pool
+  indv_list <- sample(levels(as.factor(Metradica_log$Code)), size = indv_rich_6, replace =FALSE) # first null community for class TWI 6 sampled from the whole dataset
+  Data_6_abon <- c()
+  for (s in 1:indv_rich_6){
+    
+    Data_6_abon <- rbind(Data_6_abon, 
+                         Metradica_log[sample(which(Metradica_log$Code == indv_list[s]), 1),]) #constraining the null community to have the same abundance/same number of individuals as the community of class 6 
+  }
+  
+  PCA_comm_6 <- PCA(Data_6_abon %>% dplyr::select(-Plot, -Forest,-Genus, -Species, -Name, -Type, -Habitat, -TWI, -DBH, -SD), scale.unit = TRUE, graph = FALSE)
+  class_6 <- c(class_6, PCA_comm_6$eig[1,1] - PCA_comm_6$eig[8,1])
+  class_6_sd <- c(class_6_sd , sd(PCA_comm_6$eig[,1]))
+}
+
+plot_6 <- hist(class_6)
+
+ITI_6 <- (range_6 - mean(class_6))/sd(class_6)
+ITI_6_sd <- (sd_6 - mean(class_6_sd))/sd(class_6_sd)
+
+#####################
+#Plots
+#####################
+
+#data for specialists
+data_s <- data
+data_s$ranges <- c(range_1, range_2, range_3, range_4, range_5, range_6)
+data_s$sd <- c(sd_1, sd_2, sd_3, sd_4, sd_5, sd_6)
+data_s$ITI <- c(ITI_1, ITI_2, ITI_3, ITI_4, ITI_5, ITI_6)
+data_s$ITI_sd <- c(ITI_1_sd, ITI_2_sd, ITI_3_sd, ITI_4_sd, ITI_5_sd, ITI_6_sd)
+
+#save data for specialists
+write.csv(data_s, "Dataset/TI/data_specialist.csv")
+
+```
+
+```{r specialist plot, message=FALSE, warning=FALSE, include=FALSE}
+library(ggpubr)
+
+# Calculate the proportion of TF and SF species in each class
+proportions <- Metradica_log %>%
+  group_by(class_TWI, Type) %>%
+  summarise(count = n()) %>%
+  spread(key = Type, value = count, fill = 0) %>%
+  mutate(total = TF + BF,
+         TF_prop = TF / total,
+         BF_prop = BF / total)
+
+
+#read previously saved file for specialists
+data_s <- read.csv("Dataset/TI/data_specialist.csv")
+
+
+# Merge the proportions data with data_s
+data_s <- left_join(data_s, proportions, by = c("class" = "class_TWI"))
+
+#plot specialist
+title_s <- "Specialist"
+
+# Create a text grob
+tgrob_s <- ggpubr::text_grob(title_s,size = 16)
+# Draw the text
+plot_s <- as_ggplot(tgrob_s) + theme(plot.margin = margin(0,3,0,0, "cm"))
+
+plot_df = data.frame(x = 1:20, y = rnorm(20))
+
+#Previous Plot TI (ranges standardized by effect size) along TWI 
+C <- ggplot(data_s) +
+  aes(x = mean, y = ITI,  ymax = ITI, ymin = 0) +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+   geom_pointrange(shape = "circle", size = 1, aes(color = mean)) +
+  scale_color_gradient(low = "#E79F02", high = "#56B4E9") +
+  scale_fill_manual(values = c("#E79F02", "#56B4E9"), 
+                    labels = c("TF", "SF"), 
+                    name = "Species Type") +
+  ylab(expression(atop("Trait integration index", italic("range")))) + #atop creates a line break
+  xlab("Topographic wetness index") +
+  theme(axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12),aspect.ratio = 1 ) +
+  theme_minimal(base_size = 12) +
+  guides(color = "none") +#remove legend
+    ylim(-4,6)+
+  xlim(1.7, 2.6)
+C
+
+
+#Plot with piecharts the porportions (code based on https://stackoverflow.com/questions/43984614/rggplot2geom-points-how-to-swap-points-with-pie-charts)
+
+data_s_2 <- data_s %>% 
+  rowwise() %>%
+  mutate(total = TF_prop + BF_prop) %>%
+  pivot_longer(cols = c("TF_prop", "BF_prop"), names_to = "component", values_to = "value") %>%
+  dplyr::select(mean, ITI, component, value, total)
+
+# Create pie chart grobs
+data_s.grobs <- data_s_2 %>%
+  group_by(mean, ITI, total) %>%
+  do(subplots = list(ggplot(., aes(1, value, fill = component)) + 
+                       geom_col(position = "fill", alpha = 0.75, colour = "white") + 
+                       coord_polar(theta = "y") + 
+                        scale_fill_manual(values = c("#56B4E9", "#E79F02")) + # Set colors
+                       theme_void() + 
+                       guides(fill = FALSE))) %>%
+  rowwise() %>%
+  mutate(subgrobs = list(annotation_custom(ggplotGrob(subplots[[1]]), 
+                      xmin = mean - total / 2, xmax = mean + total / 2, 
+                      ymin = ITI - total / 2, ymax = ITI + total / 2)))
+
+data_s.grobs
+
+
+#Plot
+base_plot <- ggplot(data_s) +
+  aes(x = mean, y = ITI) +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+  ylab(expression(atop("Trait integration index", italic("range")))) + 
+  xlab("Topographic wetness index") +
+  theme(axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12)) +
+  theme_minimal(base_size = 12) +
+  guides(color = "none") + 
+  ylim(-4, 6) +
+  xlim(1.7, 2.6)
+
+#Add pie charts as custom annotations
+for (i in 1:nrow(data_s.grobs)) {
+  base_plot <- base_plot +
+    data_s.grobs$subgrobs[[i]]
+}
+
+# Display the plot
+print(base_plot)
+
+# Add vertical lines from each pie chart to y = 0
+C_new <- base_plot +
+  geom_segment(data = data_s,
+               aes(x = mean, xend = mean, y = ITI, yend = 0),
+               linetype = "solid", color = "grey", size = 0.5)
+
+C_new
+
+#Previous plot TI_sd along TWI
+D <- ggplot(data_s) +
+  aes(x = mean, y = ITI_sd, ymax= ITI_sd, ymin=0) +
+  geom_pointrange(shape = "circle", size = 1, aes(color = mean)) +
+  scale_color_gradient(low = "#E79F02", high = "#56B4E9") +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+  ylab(expression(atop("Trait integration index", italic("standard deviation")))) +
+  xlab("Topographic wetness index") +
+  theme(axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12)) +
+  theme_minimal(base_size = 12)+
+  guides(color = "none")+
+  ylim(-4, 6)+
+  xlim(1.7, 2.6)
+D
+
+#Plot with piecharts the specialist proportions
+data_s_2 <- data_s %>% 
+  rowwise() %>%
+  mutate(total = TF_prop + BF_prop) %>%
+  pivot_longer(cols = c("TF_prop", "BF_prop"), names_to = "component", values_to = "value") %>%
+  dplyr::select(mean, ITI_sd, component, value, total)
+
+# Create pie chart grobs
+data_s.grobs_sd <- data_s_2 %>%
+  group_by(mean, ITI_sd, total) %>%
+  do(subplots = list(ggplot(., aes(1, value, fill = component)) + 
+                       geom_col(position = "fill", alpha = 0.75, colour = "white") + 
+                       coord_polar(theta = "y") + 
+                        scale_fill_manual(values = c("#56B4E9", "#E79F02")) + # Set colors
+                       theme_void() + 
+                       guides(fill = FALSE))) %>%
+  rowwise() %>%
+  mutate(subgrobs = list(annotation_custom(ggplotGrob(subplots[[1]]), 
+                      xmin = mean - total / 2, xmax = mean + total / 2, 
+                      ymin = ITI_sd - total / 2, ymax = ITI_sd + total / 2)))
+
+data_s.grobs_sd
+
+#Plot
+base_plot_D <- ggplot(data_s) +
+  aes(x = mean, y = ITI_sd) +
+  geom_hline(yintercept = 0, col = "gray", linetype = "dashed") +
+  ylab(expression(atop("Trait integration index", italic("standard deviation")))) + 
+  xlab("Topographic wetness index") +
+  theme(axis.text = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.title.x = element_text(size = 12)) +
+  theme_minimal(base_size = 12) +
+  guides(color = "none") + 
+  ylim(-4, 6) +
+  xlim(1.7, 2.6)
+
+#Add pie charts as custom annotations
+for (i in 1:nrow(data_s.grobs_sd)) {
+  base_plot_D <- base_plot_D +
+    data_s.grobs_sd$subgrobs[[i]]
+}
+
+
+# Add vertical lines from each pie chart to y = 0
+D_new <- base_plot_D +
+  geom_segment(data = data_s,
+               aes(x = mean, xend = mean, y = ITI_sd, yend = 0),
+               linetype = "solid", color = "grey", size = 0.5)
+
+D_new
+```
+
+```{r both, echo=FALSE}
+
+#arrange plots specialist and generalist together
+plot_generalists <- ggpubr::ggarrange(plot_0, NULL, A, B, labels = c("", "", "A", "B"), ncol = 2, nrow = 2, common.legend = TRUE, heights = c(1,5))
+
+
+plot_specialists <- ggpubr::ggarrange(plot_s, NULL, C_new, D_new, labels = c("", "", "C", "D"), ncol = 2, nrow = 2, common.legend = TRUE, heights = c(1,5))
+
+plot_publi <- ggpubr::ggarrange(plot_generalists, plot_specialists, ncol = 1, nrow = 2)
+plot_publi
+
+#save plot
+ggsave(filename = "Figure2.png", plot = plot_publi, bg = "white", width = 8, height = 7, dpi = 600)
+```
+
+
+Both multivariate indices (the range and standard deviation) show a strong increase towards the end of the TWI gradient, seasonally flooded soils (Figure 2). For generalist species, we observe a higher degree of trait association in both extreme ends of the TWI gradient (Figure 2A, 2B). For specialist species, trait integration is highest for individuals sampled in seasonally flooded soils (i.e. SF specialists) than for individuals sampled in terra firme soils (i.e. TF specialists) (Figure 2C, 2D). Seasonally flooded habitats act as a stronger environmental constraint than terra firme habitats on leaf trait syndromes linked to nutrient and water resources.
+
+## Figure 3 - Intraspecific trait variability
+
+**(H3) Generalist species express a higher intraspecific trait variability than specialist species.**
+
+CV to quantify ITV : absolute variation of the intraspecific trait with respect to the interspecific mean. 
+
+CV is defined as the ratio of the standard deviation \sigma to the mean , expressed as a percentage. CV is convenient to compare variation of traits among species as it requires no ad hoc assumptions and is unitless. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#library used
+library(dplyr) #to pipe
+library(ggplot2) #to plot
+
+## CV
+
+cv <- function(traits){
+  if(any(is.na(traits)))
+    traits=traits[!is.na(traits)]
+  N=length(traits)
+  y_bar=mean(traits)
+  s2_hat=var(traits)
+  cv_2=s2_hat/y_bar^2
+  cv_1=sqrt(cv_2)
+  gamma_1=sum(((traits-y_bar)/s2_hat^0.5)^3)/N
+  gamma_2=sum(((traits-y_bar)/s2_hat^0.5)^4)/N
+  bias=cv_2^(3/2)/N*(3*cv_2^0.5-2*gamma_1)
+  bias2=cv_1^3/N-cv_1/4/N-cv_1^2*gamma_1/2/N-cv_1*gamma_2/8/N
+  cv1=sd(traits)/mean(traits)
+  cv4=cv_1-bias2
+  re=cv4
+  return(re)
+}
+
+
+
+#data ----------
+Metradica <- read.csv("Dataset/imputed_traits/Subset_imputation_exceptSD_18042023.csv") 
+
+Metradica$Type <- as.character(Metradica$Type)
+Metradica$Name <- as.character(Metradica$Name)
+
+# For generalists ----------
+cv_G <- Metradica %>% filter(Type =="Generalist") %>% 
+  rename(Carbon = C,
+         Nitrogen = N,
+         Potassium = K, 
+         Phosphorus = P) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Carbon", "Nitrogen", "Phosphorus", "Potassium"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), log) %>% 
+  mutate(TLP = -TLP) %>%
+  group_by(Name) %>% 
+  summarise_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), funs(cv))
+
+cv_G <- bind_rows(cv_G,
+                  ungroup(cv_G) %>%
+                  summarise_all(mean) %>%
+                  mutate(Name = "mean"))
+
+cv_long_G <- reshape2::melt(cv_G, "Name", variable.name = "trait", value.name = "CV")
+
+cv_long_G$Type <- c("Generalist")
+
+#for generalists collected in SF
+
+cv_G_SF <- Metradica %>% filter(Type =="Generalist") %>% 
+  filter(Habitat == "BF") %>%
+  rename(Carbon = C,
+         Nitrogen = N,
+         Potassium = K, 
+         Phosphorus = P) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Carbon", "Nitrogen", "Phosphorus", "Potassium"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), log) %>% 
+  mutate(TLP = -TLP) %>%
+  group_by(Name) %>% 
+  summarise_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), funs(cv))
+
+cv_G_SF <- bind_rows(cv_G_SF,
+                  ungroup(cv_G_SF) %>%
+                  summarise_all(mean) %>%
+                  mutate(Name = "mean"))
+
+cv_long_G_SF <- reshape2::melt(cv_G_SF, "Name", variable.name = "trait", value.name = "CV")
+
+cv_long_G_SF$Type <- c("Generalist")
+cv_long_G_SF$Habitat <- c("BF")
+
+#for generalists collected in TF
+cv_G_TF <- Metradica %>% filter(Type =="Generalist") %>% 
+  filter(Habitat == "TF") %>%
+  rename(Carbon = C,
+         Nitrogen = N,
+         Potassium = K, 
+         Phosphorus = P) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD", "Carbon", "Nitrogen", "Phosphorus", "Potassium"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), log) %>% 
+  mutate(TLP = -TLP) %>%
+  group_by(Name) %>% 
+  summarise_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), funs(cv))
+
+cv_G_TF <- bind_rows(cv_G_TF,
+                  ungroup(cv_G_TF) %>%
+                  summarise_all(mean) %>%
+                  mutate(Name = "mean"))
+
+cv_long_G_TF <- reshape2::melt(cv_G_TF, "Name", variable.name = "trait", value.name = "CV")
+
+cv_long_G_TF$Type <- c("Generalist")
+cv_long_G_TF$Habitat <- c("TF")
+
+
+# For TF specialist -------------
+
+cv_TF <- Metradica %>% filter(Type =="TF") %>%
+  rename(Carbon = C,
+         Nitrogen = N,
+         Potassium = K, 
+         Phosphorus = P) %>% 
+    mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), log) %>% 
+  mutate(TLP = -TLP)%>%
+  group_by(Name) %>% 
+  summarise_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), funs(cv))
+
+
+cv_TF <- bind_rows(cv_TF,
+                   ungroup(cv_TF) %>% 
+                  summarise_all(mean) %>% 
+                  mutate(Name = "mean"))
+
+cv_TF$SD[7] <- (cv_TF$SD[1]+cv_TF$SD[2]+cv_TF$SD[3]+cv_TF$SD[5]+cv_TF$SD[6])/5
+
+cv_long_TF <- reshape2::melt(cv_TF, "Name", variable.name = "trait", value.name = "CV")
+
+cv_long_TF$Type <- c("TF")
+cv_long_TF$Habitat <- c("TF")
+
+# For BF specialist-----------
+
+cv_BF <-  Metradica %>% filter(Type =="BF") %>% 
+   rename(Carbon = C,
+         Nitrogen = N,
+         Potassium = K, 
+         Phosphorus = P) %>% 
+    mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), abs) %>% 
+  mutate_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), log) %>% 
+  mutate(TLP = -TLP)%>%
+  group_by(Name) %>% 
+  summarise_at(c("Gmin","TLP", "LSWC", "MajVLA", "SD",  "Carbon", "Nitrogen", "Phosphorus", "Potassium"), funs(cv))
+
+cv_BF <- bind_rows(cv_BF,
+                ungroup(cv_BF) %>% 
+                  summarise_all(mean) %>% 
+                  mutate(Name = "mean")) 
+
+cv_BF$SD[10] <- (cv_BF$SD[2]+cv_BF$SD[3]+cv_BF$SD[4]+cv_BF$SD[5]+cv_BF$SD[6]+cv_BF$SD[7]+cv_BF$SD[8]+cv_BF$SD[9])/8
+
+cv_long_BF <- reshape2::melt(cv_BF, "Name", variable.name = "trait", value.name = "CV") 
+
+cv_long_BF$Type <- c("BF")
+cv_long_BF$Habitat <- c("BF")
+
+cv_tot <- bind_rows(cv_long_BF, cv_long_TF, cv_long_G_SF, cv_long_G_TF) 
+
+# plot all 
+
+#add habitat of collect information for better plotting
+
+cv_tot$Type <- dplyr::recode(cv_tot$Type,"TF"= "TF specialist", "BF" = "SF specialist")
+cv_tot$Habitat <- dplyr::recode(cv_tot$Habitat,"TF"="Terra firme", "BF"="Seasonally flooded")
+
+max_y <- max(cv_tot$CV * 100, na.rm = TRUE)
+
+#mean data
+mean_data <- cv_tot %>%
+   filter(Name == "mean") %>%
+    mutate(trait = dplyr::recode(trait, "Gmin" = "g[min]")) 
+
+cv_data <- cv_tot %>%
+   mutate(trait = dplyr::recode(trait, "Gmin" = "g[min]")) %>%
+   filter(Name != "mean") %>% 
+  tidyr::separate(Name, c("Genus", "Species"), sep = "_", remove = F) %>%
+    mutate(Taxa = paste0(substr(Genus, start=1, stop=1), ". ", Species)) %>%
+ mutate(CV =CV*100)
+
+#to jitter points according to first Habitat and then Type:
+
+# Create a mapping for Type to adjust the x positions
+type_adjustment <- c(
+  "Generalist" = -0.2,
+  "SF specialist" = 0.2,
+  "TF specialist" = 0.2
+)
+
+# Adjust the x positions slightly based on the Type within each Habitat
+cv_data <- cv_data %>%
+  mutate(Habitat_Adjusted = as.numeric(as.factor(Habitat)) + type_adjustment[Type])
+
+# Create a jitter object with the desired horizontal jitter width
+jitter <- position_jitter(width = 0.05, height = 0)
+
+cv_plot <- ggplot() +
+  geom_boxplot(data = cv_data, aes(x = as.factor(as.numeric(as.factor(Habitat))), y = CV, color = Type)) +
+  geom_point(data = cv_data, aes(x = Habitat_Adjusted, y = CV, shape = Taxa, color = Type), 
+             size = 2.3, alpha = 0.7, position = jitter) +
+  scale_color_manual(values = c(Generalist = "#009E72",
+                                `SF specialist` = "#56B4E9",
+                                `TF specialist` = "#E79F02")) +
+  scale_shape_manual(values = c("C. surinamensis" = 0, "E. falcata" = 1, "E. coriacea" = 2, "I. hostmannii" = 3, 
+                                "L. procera" = 4, "P. opacum subsp. rabelianum" = 5, "P. officinalis" = 6, 
+                                "S. globulifera" = 7, "V. surinamensis" = 8, "D. guianensis" = 9, 
+                                "G. hexapetala" = 10, "I. sagotiana" = 11, "L. membranacea" = 12,  
+                                "P. guianensis" = 13, "V. michelii" = 14, "B. prouacensis" = 15,  
+                                "C. guianensis" = 16, "H. heteromorphus" = 17, 
+                                "J. copaia subsp. copaia" = 18, "P. stevensonii" = 19,  
+                                "T. melinonii" = 20)) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(size = 12, face = "bold")) +
+  facet_wrap(~trait, scales = "free_y", labeller = label_parsed) +
+  labs(x = "", y = "Coefficient of variation (%)", color = "Species' preference", shape = "Species") +
+  guides(
+    color = guide_legend(order = 1),
+    shape = guide_legend(order = 2, ncol = 5, byrow = TRUE, title.position = "top")
+  ) +
+  theme(legend.box = "vertical", legend.position = "bottom", legend.text = element_text(face = "italic")) +
+  ylim(0, max_y)+
+  scale_x_discrete(labels=c("1" = "Seasonally flooded", "2" = "Terra firme"))
+
+cv_plot
+
+ggsave(filename = "Figure3.png", plot = cv_plot, bg = "white", width = 9, height = 8, dpi = 600)
+```
+
+
+Leaf traits showed non-negligeable CV within species for all preferences (Figure 3). The lowest CVs are observed for leaf carbon concentration (0.9 % for SF specialists ; 1.1 % for TF specialists and 1.3 % for generalists), but also LSWC and SD. Moderate CVs are observed for TLP, MajVLA and leaf potassium concentration. The highest CV are observed for gmin, with 68% for SF specialists, and 60 % for TF specialists. Generalist species do not necessarily exhibit a higher CV compared to specialist species (Figure 3), but this was the case for leaf potassium concentration (6 generalist species), LSWC (3 generalist species), leaf nitrogen concentration (2 generalist species), P (1 generalist species).

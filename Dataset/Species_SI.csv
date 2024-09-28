@@ -1,0 +1,22 @@
+Family,Genus,Species,Paracou,Bafog,Kaw,Indval_SF,Indval_TF,P.value,Type
+Fabaceae,Bocoa,prouacensis,15,10,3,0.001,0.041,0.0056,Generalist
+Euphorbiaceae,Conceveiba,guianensis,20,16,0,0.222,0.277,0.002,Generalist
+Lecythidaceae,Eschweilera,coriacea,20,19,10,0.286,0.16,6.00E-04,SF specialist
+Chrysobalanaceae,Hymenopus,heteromorphus,22,14,8,0.119,0.067,0.0026,Generalist
+Bignoniaceae,Jacaranda,copaia subsp. copaia,20,13,15,0.001,0.087,0.002,Generalist
+Burseraceae,Protium,stevensonii,12,12,1,0,0.091,0.0012,Generalist
+Fabaceae,Tachigali,melinonii,16,16,13,0.137,0.009,0.001,Generalist
+Myristicaceae,Virola,michelii,11,16,6,0.043,0.278,4.00E-04,TF specialist
+Meliaceae,Carapa,surinamensis,10,1,0,0.472,0.19,2.00E-04,SF specialist
+Fabaceae,Eperua,falcata,11,0,10,0.261,0.024,0.0012,SF specialist
+Myristicaceae,Iryanthera,hostmannii,9,10,10,0.275,0.071,2.00E-04,SF specialist
+Salicacea,Laetia,procera,9,10,10,0.252,0.023,2.00E-04,SF specialist
+Burseraceae,Protium,opacum subsp. rabelianum,10,0,11,0.383,0.127,4.00E-04,SF specialist
+Fabaceae,Pterocarpus,officinalis,10,10,10,0.796,0,2.00E-04,SF specialist
+Clusiaceae,Symphonia,globulifera,10,9,10,0.541,0,2.00E-04,SF specialist
+Myristicaceae,Virola,surinamensis,6,10,10,0.44,0.001,2.00E-04,SF specialist
+Fabaceae,Dicorynia,guianensis,6,6,0,0.046,0.413,2.00E-04,TF specialist
+Lecythidaceae,Gustavia,hexapetala,5,9,5,0.079,0.399,2.00E-04,TF specialist
+Myristicaceae,Iryanthera,sagotiana,5,5,10,0.02,0.347,2.00E-04,TF specialist
+Chrysobalanaceae,Licania,membranacea,5,4,5,0.001,0.388,2.00E-04,TF specialist
+Metteniusaceae,Poraqueiba,guianensis,11,10,10,0.011,0.293,2.00E-04,TF specialist
